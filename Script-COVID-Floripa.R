@@ -1,28 +1,35 @@
 rm(list=ls())
 #### PACOTES ####
 library(tidyverse)
-library(ISOweek)
-
-
+library(ISOweek) # Para agrupar dias em semanas
+library(DescTools) # Para calcular PseudoR2 do modelo Logit
+library(caret) # Para rodar Árvore de Decisão
+library(rattle) # Para plotar Árvore de Decisão
+library(randomForest) # Para rodar Modelo Random Forest
 
 #### LEITURA E LIMPEZA DOS DADOS ####
 
-df <-  read.csv("Dados/covid_florianopolis.csv", encoding="UTF-8")
+df <-  read.csv("Dados/covid_florianopolis.csv", encoding="UTF-8", stringsAsFactors = T)
 dados <- df
 
 # Transformando data de notificação em Date
-dados$data_notificacao <- as.Date(dados$data_notificacao) 
+dados$data_notificacao <- as.Date(dados$data_notificacao)
 
 # Criando semanas
-dados$week <- ISOweek(dados$data_notificacao)
+dados$week <- ISOweek::ISOweek(dados$data_notificacao)
 
 # Filtrando datas de notificações com erro de digitação
 dados <- dados %>% 
-  filter(data_notificacao >= "2020-03-01") 
+  filter(data_notificacao >= "2020-03-01")
 
-# Filtrando casos de outras cidades de SC (Mantendo Florianópolis e outros estados)
-dados <- dados %>% 
-  filter(municipio_residencia == "FLORIANOPOLIS" | uf_residencia != "SANTA CATARINA") 
+# Filtrando somente casos confirmados  
+dados_confirmados <- dados %>%   
+  filter(classificacao_final == "CONFIRMAÇÃO LABORATORIAL" | 
+           classificacao_final == "CONFIRMAÇÃO CLÍNICO EPIDEMIOLÓGICO" )
+
+# Verificando quantidade de óbitos
+table(dados_confirmados$obito)
+
 
 
 #### PERFIL DOS CASOS ####
@@ -32,7 +39,7 @@ dados <- dados %>%
 
 #### PERFIL DOS ÓBITOS ####
 
-dados_obitos <- dados %>%
+dados_obitos <- dados_confirmados %>%
   filter(obito == "SIM")
 
 # Óbitos por sexo, idade e raça
@@ -126,7 +133,7 @@ data_de_corte <- "2021-01-01" # Inserir data
 
 # Filtrando casos após a data de corte e somente idosos (70+)
 
-dados_casos_dia <- dados %>%
+dados_casos_dia <- dados_confirmados %>%
   filter(data_notificacao >= data_de_corte) %>%
   group_by(data_notificacao, faixa_idade) %>%
   summarise(quantidade = n()) %>%
@@ -134,13 +141,13 @@ dados_casos_dia <- dados %>%
   mutate(vacinado = faixa_idade == "90 ANOS OU MAIS" | faixa_idade == "80 A 89 ANOS")
 
 
-# Plotando gráfico com barras empilhadas (100%)
+# Plotando gráfico de linha
 
 ggplot(dados_casos_dia, aes(x = data_notificacao, y = quantidade, color = faixa_idade)) +
   geom_line()
 
 
-# Plotando gráfico com barras
+# Plotando gráfico com barras empilhadas (100%)
 
 ggplot(dados_casos_dia, aes(x = data_notificacao, y = quantidade, fill = faixa_idade)) +
   geom_bar(stat = "identity", position = "fill")
@@ -151,7 +158,7 @@ ggplot(dados_casos_dia, aes(x = data_notificacao, y = quantidade, fill = faixa_i
 
 # Filtrando casos após a data de corte e somente idosos (70+)
 
-dados_casos_semana <- dados %>%
+dados_casos_semana <- dados_confirmados %>%
   filter(data_notificacao >= data_de_corte) %>%
   group_by(week, faixa_idade) %>%
   summarise(quantidade = n()) %>%  
@@ -171,12 +178,11 @@ ggplot(dados_casos_semana, aes(x = week, y = quantidade, fill = faixa_idade)) +
   geom_bar(stat = "identity", position = "dodge")
 
 
-
 #### OBITOS POR DIA ####
 
 # Filtrando somente obitos, após a data de corte, sem missings e somente idosos (70+)
 
-dados_obitos_dia <- dados %>%
+dados_obitos_dia <- dados_confirmados %>%
   filter(obito == "SIM" & data_notificacao >= data_de_corte) %>%
   filter(data_obito != "") %>%
   group_by(data_obito, faixa_idade) %>%
@@ -187,13 +193,15 @@ dados_obitos_dia <- dados %>%
 # Plotando gráfico com barras empilhadas (100%)
 
 ggplot(dados_obitos_dia, aes(x = data_obito, y = quantidade, fill = faixa_idade)) +
-  geom_bar(stat = "identity", position="fill")
+  geom_bar(stat = "identity", position="fill") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
 
 # Plotando gráfico com barras
 
 ggplot(dados_obitos_dia, aes(x = data_obito, y = quantidade, fill = faixa_idade)) +
-  geom_bar(stat = "identity", position = "dodge")
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
 
 
@@ -201,7 +209,7 @@ ggplot(dados_obitos_dia, aes(x = data_obito, y = quantidade, fill = faixa_idade)
 
 # Filtrando somente obitos, após a data de corte, sem missings e somente idosos (70+)
 
-dados_obitos_semana <- dados %>%
+dados_obitos_semana <- dados_confirmados %>%
   filter(obito == "SIM" & data_notificacao >= data_de_corte) %>%
   filter(data_obito != "") %>%
   group_by(week, faixa_idade) %>%
@@ -219,3 +227,101 @@ ggplot(dados_obitos_semana, aes(x = week, y = quantidade, fill = faixa_idade)) +
 
 ggplot(dados_obitos_semana, aes(x = week, y = quantidade, fill = faixa_idade)) +
   geom_bar(stat = "identity", position = "dodge")
+
+
+
+#### MODELO LOGIT ####
+
+# Treinando o modelo de regressão logística
+
+logit_model <- glm(obito ~ sexo  + faixa_idade + raca  + + diabetes + doenca_resp_descompensada 
+             + doencas_renais_avancado + doenca_card_cronica + gestante_alto_risco
+             + portador_doenca_cromossomica + imunossupressao, data = dados_confirmados, 
+             family = binomial)
+
+summary(logit_model)
+
+
+# Cálculando o PseudoR2
+
+DescTools::PseudoR2(logit_model)
+
+
+# Prevendo a probabilidade de cada caso do modelo de regressão logística
+
+logit_model_probs <- predict(logit_model,type = "response")
+
+
+# Prevendo o resultado de cada probabilidade do modelo de regressão logística
+
+logit_model_preds <- ifelse(logit_model_probs > 0.5, "Pred Obito", "Pred Vivo")
+
+
+# Calculando a matriz de confusão do modelo de regressão logística
+
+logit_matriz_confusao <- table(dados_confirmados$obito, logit_model_preds)
+logit_matriz_confusao
+
+
+# Calculando porcentagem de acertos do modelo de regressão logística
+logit_acertos <- logit_matriz_confusao[2] + logit_matriz_confusao[3]
+logit_porcentagem_acertos <- logit_acertos / length(dados_confirmados$obito)
+logit_porcentagem_acertos
+
+
+
+#### DECISION TREE ####
+
+
+# Set seed
+
+set.seed(123)
+
+
+# Criando datasets de treino e teste
+
+inTrain <- caret::createDataPartition(y = dados_confirmados$obito, p = 0.7, list = FALSE)
+
+treino <- dados_confirmados[inTrain, ]
+
+teste <- dados_confirmados[-inTrain, ]
+
+
+# Treinando o modelo de árvore de decisão no dataset de treino
+
+Tree_Model <- caret::train(obito ~ ., method = "rpart", data = treino[,c(7:9,16:27,33)])
+
+
+# Plotando árvore de decisão
+
+rattle::fancyRpartPlot(Tree_Model$finalModel)
+
+
+# Prevendo o resultado do modelo de árvore de decisão no dataset de teste
+
+Tree_Preds <- predict(Tree_Model, newdata = teste[,c(7:9,16:27)])
+
+
+# Calculando a matriz de confusão do modelo de árvore de decisão
+
+confusionMatrix(Tree_Preds, teste$obito)
+
+
+
+#### RANDOM FOREST ####
+
+# Treinando o modelo de random forest no dataset de treino 
+
+forest_model <- randomForest::randomForest(obito ~ ., data = treino[,c(7:9,16:27,33)])
+
+
+# Prevendo o resultado do modelo de random forest no dataset de teste
+
+forest_model_preds <- predict(forest_model, newdata = teste[,c(7:9,16:27)])
+
+
+# Calculando a matriz de confusão do modelo de random forest
+
+confusionMatrix(forest_model_preds, teste$obito)
+
+
